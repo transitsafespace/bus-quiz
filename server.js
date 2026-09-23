@@ -15,8 +15,11 @@ const app = express();
 const server = http.createServer(app);
 const io = new Server(server);
 
-app.use(express.static(path.join(__dirname, 'public')));
-app.get('/host', (req, res) => res.sendFile(path.join(__dirname, 'public', 'host.html')));
+   const send = (file) => (req, res) => res.sendFile(path.join(__dirname, file));
+   app.get('/', send('index.html'));
+   app.get('/host', send('host.html'));
+   app.get('/common.js', send('common.js'));
+   app.get('/style.css', send('style.css'));
 
 // ---------- สถานะเกม ----------
 const game = {
