@@ -1,0 +1,202 @@
+<!doctype html>
+<html lang="th">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>ควิซรถเมล์ปลอดภัย</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Anuphan:wght@400;600;700;800&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <main class="wrap" id="app" aria-live="polite"></main>
+
+  <script src="/socket.io/socket.io.js"></script>
+  <script src="/common.js"></script>
+  <script>
+    const socket = io();
+    const app = document.getElementById('app');
+
+    let state = null;   // สถานะเกมจากเซิร์ฟเวอร์
+    let me = null;      // ข้อมูลของเรา
+    let joinError = '';
+    let answerError = '';
+    let selected = { qIndex: -1, choices: [] }; // ตัวเลือกที่กดไว้ (ข้อตอบได้หลายข้อ)
+    let sending = false;
+
+    // เก็บ id ไว้ในแท็บนี้ รีเฟรชแล้วคะแนนไม่หาย (แต่ละแท็บ = ผู้เล่นคนละคน)
+    const store = {
+      get() { try { return JSON.parse(sessionStorage.getItem('quiz-player') || 'null'); } catch { return null; } },
+      set(v) { try { sessionStorage.setItem('quiz-player', JSON.stringify(v)); } catch {} },
+      clear() { try { sessionStorage.removeItem('quiz-player'); } catch {} },
+    };
+
+    function join(name) {
+      const saved = store.get();
+      socket.emit('player:join', { name, playerId: saved && saved.playerId }, (res) => {
+        if (res && res.ok) {
+          store.set({ playerId: res.playerId });
+          joinError = '';
+        } else {
+          if (saved) store.clear(); // เซิร์ฟเวอร์รีสตาร์ต id เก่าใช้ไม่ได้แล้ว
+          joinError = (res && res.error) || 'เข้าร่วมไม่สำเร็จ';
+          me = null;
+        }
+        render();
+      });
+    }
+
+    socket.on('connect', () => { if (store.get()) join(''); });
+    socket.on('state', (s) => {
+      syncClock(s);
+      if (!state || s.qIndex !== state.qIndex || s.phase !== state.phase) answerError = '';
+      state = s;
+      render();
+    });
+    socket.on('me', (m) => { me = m; render(); });
+    socket.on('kicked', (msg) => { me = null; store.clear(); joinError = msg; render(); });
+    socket.on('disconnect', () => render());
+    onTimeUp(() => render());
+
+    function sendAnswer(choices) {
+      if (sending) return;
+      sending = true;
+      socket.emit('player:answer', { qIndex: state.qIndex, choices }, (res) => {
+        sending = false;
+        answerError = res && res.ok ? '' : (res && res.error) || 'ส่งคำตอบไม่สำเร็จ';
+        render();
+      });
+    }
+
+    // ---------- หน้าจอต่าง ๆ ----------
+    function joinScreen() {
+      return `<section class="hero">
+          <h1>ควิซรถเมล์ปลอดภัย</h1>
+          <p>ใส่ชื่อแล้วเข้าห้องได้เลย ไม่ต้องสมัครสมาชิก</p>
+        </section>
+        <form class="card" id="join-form" novalidate>
+          <label for="name"><strong>ชื่อที่จะแสดงในเกม</strong></label>
+          <input type="text" id="name" maxlength="20" autocomplete="nickname" placeholder="เช่น ต้นข้าว" style="margin:8px 0 12px">
+          <button class="btn wide" type="submit">เข้าร่วมเกม</button>
+          <p class="error" role="alert">${esc(joinError)}</p>
+        </form>`;
+    }
+
+    function lobbyScreen() {
+      return `<div class="card waiting">
+        <p class="big">สวัสดี ${esc(me.name)}</p>
+        <p><span class="pulse"></span>รอผู้จัดเริ่มเกม</p>
+        <p class="hint">ตอนนี้มีผู้เล่น ${state.playerCount} คน</p>
+      </div>`;
+    }
+
+    function questionScreen() {
+      const q = state.question;
+      if (selected.qIndex !== state.qIndex) selected = { qIndex: state.qIndex, choices: [] };
+      const timeUp = serverNow() >= state.endsAt;
+      const head = `<div class="topbar">${routeBadge(state.qIndex, state.total)}${timerHTML(state.endsAt, state.seconds)}</div>
+        <div class="card"><p class="qtext">${esc(q.text)}</p>
+        <p class="hint">${q.multi ? 'ตอบได้มากกว่า 1 ข้อ เลือกแล้วกด "ส่งคำตอบ"' : 'แตะคำตอบที่ตรงกับคุณที่สุด 1 ข้อ'}</p></div>`;
+
+      if (me.answered) {
+        const picked = me.choices.map((i) => `<li>${esc(q.options[i])}</li>`).join('');
+        return head + `<div class="card waiting">
+          <p class="big">ส่งคำตอบแล้ว</p>
+          <ul style="text-align:left;display:inline-block;margin:0 0 12px">${picked}</ul>
+          <p class="hint"><span class="pulse"></span>ตอบแล้ว ${state.answeredCount}/${state.playerCount} คน รอเฉลยพร้อมกัน</p>
+        </div>`;
+      }
+
+      const opts = q.options.map((o, i) => {
+        const on = selected.choices.includes(i);
+        return `<button class="opt" data-i="${i}" style="--c:${colorOf(i)}" ${q.multi ? `aria-pressed="${on}"` : ''} ${timeUp || sending ? 'disabled' : ''}>
+          <span class="key">${on ? '✓' : i + 1}</span><span>${esc(o)}</span></button>`;
+      }).join('');
+
+      const submit = q.multi
+        ? `<button class="btn wide" id="submit" style="margin-top:14px" ${!selected.choices.length || timeUp || sending ? 'disabled' : ''}>ส่งคำตอบ (${selected.choices.length} ข้อ)</button>`
+        : '';
+
+      return head + `<div class="opts">${opts}</div>${submit}
+        <p class="error" role="alert">${timeUp ? 'หมดเวลาแล้ว' : esc(answerError)}</p>`;
+    }
+
+    function revealScreen() {
+      const r = me.result;
+      let mine;
+      if (!r) {
+        mine = `<div class="card mine-result"><p class="gain zero">+0</p><p>ข้อนี้คุณไม่ทันตอบ</p></div>`;
+      } else {
+        mine = `<div class="card mine-result">
+          <p class="gain${r.points + r.bonus === 0 ? ' zero' : ''}">+${r.points + r.bonus}</p>
+          <p>ได้ ${r.points} คะแนนจากตัวเลือกที่ถูก</p>
+          ${r.bonus ? '<p class="extra">⚡ รวมโบนัส +2 เพราะคุณตอบถูกไวที่สุด</p>' : ''}
+          <p class="hint">คะแนนรวมตอนนี้ ${me.score}</p>
+        </div>`;
+      }
+      return `<div class="topbar">${routeBadge(state.qIndex, state.total)}<span class="meta">เฉลย</span></div>
+        ${mine}
+        <div class="card"><p class="qtext" style="font-size:1.1rem">${esc(state.question.text)}</p>
+        ${revealHTML(state.question, state.reveal, me.choices)}${bonusHTML(state.reveal)}</div>`;
+    }
+
+    function leaderboardScreen(final) {
+      const top = state.leaderboard.slice(0, 5).map((p) =>
+        `<li class="${p.name === me.name ? 'is-me' : ''}"><span class="rank">${p.rank}</span><span>${esc(p.name)}</span><span class="plus">${p.gain ? '+' + p.gain : ''}</span><span class="score">${p.score}</span></li>`
+      ).join('');
+      return `<div class="card waiting">
+          <p class="hint">${final ? 'จบเกมแล้ว คุณได้อันดับ' : 'ตอนนี้คุณอยู่อันดับ'}</p>
+          <p class="stat-big">${me.rank}</p>
+          <p class="hint">จาก ${me.playerTotal} คน คะแนนรวม <strong>${me.score}</strong>${!final && me.gain ? ` (+${me.gain} ข้อนี้)` : ''}</p>
+        </div>
+        <h2 style="margin-top:22px">${final ? 'ผลรวมสุดท้าย' : '5 อันดับแรก'}</h2>
+        <ol class="board">${top}</ol>
+        ${final ? '' : '<p class="hint center" style="color:#C9D3F0;margin-top:14px">รอผู้จัดเปิดข้อถัดไป</p>'}`;
+    }
+
+    function render() {
+      if (!state) { app.innerHTML = '<div class="card waiting"><span class="pulse"></span>กำลังเชื่อมต่อ</div>'; return; }
+      const nameDraft = document.getElementById('name')?.value || '';
+
+      if (!me) {
+        app.innerHTML = joinScreen();
+        const input = document.getElementById('name');
+        input.value = nameDraft;
+        document.getElementById('join-form').addEventListener('submit', (e) => {
+          e.preventDefault();
+          const name = input.value.trim();
+          if (!name) { joinError = 'กรุณาใส่ชื่อ'; render(); return; }
+          store.clear();
+          join(name);
+        });
+        if (!nameDraft) input.focus();
+        return;
+      }
+
+      let html;
+      switch (state.phase) {
+        case 'lobby': html = lobbyScreen(); break;
+        case 'question': html = questionScreen(); break;
+        case 'reveal': html = revealScreen(); break;
+        case 'leaderboard': html = leaderboardScreen(false); break;
+        case 'final': html = leaderboardScreen(true); break;
+      }
+      if (!socket.connected) html = '<p class="error" style="color:var(--yellow)">การเชื่อมต่อหลุด กำลังต่อใหม่…</p>' + html;
+      app.innerHTML = html;
+
+      if (state.phase === 'question' && !me.answered) {
+        app.querySelectorAll('.opt').forEach((btn) => btn.addEventListener('click', () => {
+          const i = Number(btn.dataset.i);
+          if (!state.question.multi) { sendAnswer([i]); return; }
+          const c = selected.choices;
+          selected.choices = c.includes(i) ? c.filter((x) => x !== i) : [...c, i];
+          render();
+        }));
+        document.getElementById('submit')?.addEventListener('click', () => sendAnswer(selected.choices));
+      }
+    }
+    render();
+  </script>
+</body>
+</html>

@@ -1,0 +1,132 @@
+<!doctype html>
+<html lang="th">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>ผู้จัด | ควิซรถเมล์ปลอดภัย</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Anuphan:wght@400;600;700;800&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body class="host">
+  <main class="wrap" id="app"></main>
+
+  <script src="/socket.io/socket.io.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
+  <script src="/common.js"></script>
+  <script>
+    const socket = io();
+    const app = document.getElementById('app');
+    const hostKey = new URLSearchParams(location.search).get('key') || '';
+    const joinUrl = location.origin + '/';
+
+    let state = null;
+    let authed = false;
+    let authError = '';
+
+    socket.on('connect', () => {
+      socket.emit('host:join', { key: hostKey }, (res) => {
+        authed = !!(res && res.ok);
+        authError = authed ? '' : (res && res.error) || 'เข้าหน้าผู้จัดไม่สำเร็จ';
+        render();
+      });
+    });
+    socket.on('state', (s) => { syncClock(s); state = s; render(); });
+
+    const next = () => socket.emit('host:next');
+    const reset = () => {
+      if (confirm('เริ่มเกมใหม่? คะแนนทั้งหมดจะถูกล้าง (ผู้เล่นที่ออนไลน์อยู่ยังอยู่ในห้อง)')) socket.emit('host:reset');
+    };
+
+    function lobbyScreen() {
+      const chips = state.lobby.map((n) => `<span class="chip">${esc(n)}</span>`).join('');
+      return `<div class="lobby">
+          <div class="join-box">
+            <p style="margin:0">สแกนหรือเปิดลิงก์นี้เพื่อเข้าเล่น</p>
+            <div id="qr"></div>
+            <p class="join-url">${esc(joinUrl)}</p>
+            <p class="hint" style="margin:0">ใส่ชื่อแล้วเล่นได้เลย ไม่ต้องล็อกอิน</p>
+          </div>
+          <div>
+            <h1 style="font-size:2.4rem">ควิซรถเมล์ปลอดภัย</h1>
+            <p class="answered">ผู้เล่นในห้อง <b>${state.playerCount}</b> คน</p>
+            <div class="chips">${chips || '<span style="color:#C9D3F0">ยังไม่มีใครเข้ามา แชร์ลิงก์ด้านซ้ายได้เลย</span>'}</div>
+          </div>
+        </div>
+        <div class="controls">
+          <span class="hint" style="color:#C9D3F0">${state.total} ข้อ ข้อละ ${state.seconds} วินาที</span>
+          <button class="btn" id="next" ${state.playerCount ? '' : 'disabled'}>เริ่มเกม</button>
+        </div>`;
+    }
+
+    function questionScreen() {
+      const q = state.question;
+      const opts = q.options.map((o, i) =>
+        `<div class="opt" style="--c:${colorOf(i)}"><span class="key">${i + 1}</span><span>${esc(o)}</span></div>`).join('');
+      return `<div class="topbar">${routeBadge(state.qIndex, state.total)}
+          <span class="answered">ตอบแล้ว <b>${state.answeredCount}</b>/${state.playerCount}</span></div>
+        <div class="question-head">
+          <div class="card"><p class="qtext">${esc(q.text)}</p>
+          ${q.multi ? '<p class="hint">ตอบได้มากกว่า 1 ข้อ</p>' : ''}</div>
+          ${timerHTML(state.endsAt, state.seconds, true)}
+        </div>
+        <div class="opts">${opts}</div>
+        <div class="controls"><button class="btn ghost" id="next">ปิดรับคำตอบเลย</button></div>`;
+    }
+
+    function revealScreen() {
+      const last = state.qIndex >= state.total - 1;
+      return `<div class="topbar">${routeBadge(state.qIndex, state.total)}
+          <span class="answered">ตอบ <b>${state.reveal.answered}</b> คน</span></div>
+        <div class="card">
+          <p class="qtext" style="font-size:1.5rem">${esc(state.question.text)}</p>
+          ${revealHTML(state.question, state.reveal)}
+          ${bonusHTML(state.reveal)}
+        </div>
+        <div class="controls"><button class="btn" id="next">${last ? 'ดูผลสรุป' : 'ดูอันดับ'}</button></div>`;
+    }
+
+    function leaderboardScreen() {
+      const rows = state.leaderboard.slice(0, 5).map((p) =>
+        `<li><span class="rank">${p.rank}</span><span>${esc(p.name)}</span><span class="plus">${p.gain ? '+' + p.gain : ''}</span><span class="score">${p.score}</span></li>`).join('');
+      return `<div class="topbar"><h1 style="margin:0">อันดับหลังข้อ ${state.qIndex + 1}</h1></div>
+        <ol class="board">${rows || '<li>ยังไม่มีผู้เล่น</li>'}</ol>
+        <div class="controls"><button class="btn" id="next">ข้อ ${state.qIndex + 2}</button></div>`;
+    }
+
+    function finalScreen() {
+      const lb = state.leaderboard;
+      const step = (p, cls) => p
+        ? `<div class="step ${cls}"><div class="name">${esc(p.name)}</div><div class="pts">${p.score} คะแนน</div><div class="block">${p.rank}</div></div>`
+        : `<div class="step ${cls}"></div>`;
+      const rest = lb.slice(3).map((p) =>
+        `<li><span class="rank">${p.rank}</span><span>${esc(p.name)}</span><span></span><span class="score">${p.score}</span></li>`).join('');
+      return `<h1 class="center" style="font-size:2.6rem">ผลรวมสุดท้าย</h1>
+        <div class="podium">${step(lb[1], 'p2')}${step(lb[0], 'p1')}${step(lb[2], 'p3')}</div>
+        ${rest ? `<ol class="board">${rest}</ol>` : ''}
+        <div class="controls"><button class="btn" id="reset-main">เล่นใหม่อีกรอบ</button></div>`;
+    }
+
+    function render() {
+      if (!authed) {
+        app.innerHTML = `<div class="card waiting"><p class="big">${authError ? esc(authError) : 'กำลังเชื่อมต่อ'}</p>
+          ${authError ? '<p class="hint">เปิดหน้านี้ด้วยลิงก์ /host?key=รหัสผู้จัด</p>' : ''}</div>`;
+        return;
+      }
+      if (!state) return;
+      const screens = { lobby: lobbyScreen, question: questionScreen, reveal: revealScreen, leaderboard: leaderboardScreen, final: finalScreen };
+      app.innerHTML = screens[state.phase]() +
+        (state.phase !== 'lobby' ? '<div class="controls" style="margin-top:36px"><button class="btn ghost small" id="reset">เริ่มใหม่ทั้งหมด</button></div>' : '');
+
+      document.getElementById('next')?.addEventListener('click', next);
+      document.getElementById('reset')?.addEventListener('click', reset);
+      document.getElementById('reset-main')?.addEventListener('click', reset);
+
+      const qr = document.getElementById('qr');
+      if (qr && window.QRCode) new QRCode(qr, { text: joinUrl, width: 220, height: 220, colorDark: '#15307C', colorLight: '#ffffff' });
+    }
+    render();
+  </script>
+</body>
+</html>
